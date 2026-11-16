@@ -4,6 +4,7 @@ Fitur: kasir, strata harga (jumlah + jenis pelanggan), hutang, poin member,
 struk (cetak / salin / WhatsApp), dan dasbor penjualan.
 Data disimpan di SQLite (file basmallah.db).
 """
+import html
 import io
 import sqlite3
 import urllib.parse
@@ -27,6 +28,24 @@ STRUK_WIDTH = 32
 # ----------------------------------------------------------------------------
 def rp(n) -> str:
     return "Rp" + f"{int(round(n)):,}".replace(",", ".")
+
+
+def bar_list(items, fmt=str) -> None:
+    """Grafik batang horizontal sederhana (HTML/CSS). Sengaja tidak memakai st.bar_chart
+    supaya tidak bergantung pada Altair, yang gagal diimpor di Python 3.14."""
+    maks = max([v for _, v in items] + [1])
+    baris = []
+    for label, v in items:
+        lebar = v / maks * 100
+        baris.append(
+            "<div style='margin-bottom:10px'>"
+            "<div style='display:flex;justify-content:space-between;gap:8px;font-size:14px'>"
+            f"<span>{html.escape(str(label))}</span><b>{html.escape(str(fmt(v)))}</b></div>"
+            "<div style='height:8px;border-radius:99px;background:rgba(128,128,128,.22);overflow:hidden'>"
+            f"<div style='width:{lebar:.1f}%;height:100%;background:#0d6b52;border-radius:99px'></div>"
+            "</div></div>"
+        )
+    st.markdown("".join(baris), unsafe_allow_html=True)
 
 
 def now_ts() -> str:
@@ -549,8 +568,10 @@ def page_dasbor(cfg: dict) -> None:
         tanggal = [(datetime.now(TZ) - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
         data = df("SELECT substr(ts,1,10) AS tgl, SUM(total) AS omzet FROM transaksi GROUP BY tgl")
         peta = dict(zip(data["tgl"], data["omzet"]))
-        grafik = pd.DataFrame({"Tanggal": tanggal, "Penjualan (Rp)": [peta.get(t, 0) for t in tanggal]}).set_index("Tanggal")
-        st.bar_chart(grafik)
+        bar_list(
+            [(datetime.strptime(t, "%Y-%m-%d").strftime("%d/%m"), int(peta.get(t, 0))) for t in tanggal],
+            fmt=rp,
+        )
     with c2:
         st.markdown("**Barang terlaris**")
         top = df(
@@ -560,7 +581,10 @@ def page_dasbor(cfg: dict) -> None:
         if top.empty:
             st.caption("Belum ada penjualan.")
         else:
-            st.bar_chart(top.set_index("Barang"))
+            bar_list(
+                [(r["Barang"], int(r["Terjual"])) for _, r in top.iterrows()],
+                fmt=lambda v: f"{v} terjual",
+            )
 
     c3, c4 = st.columns(2, gap="large")
     with c3:
