@@ -4,6 +4,7 @@ Fitur: kasir, strata harga (jumlah + jenis pelanggan), hutang, poin member,
 struk (cetak / salin / WhatsApp), dan dasbor penjualan.
 Data disimpan di SQLite (file basmallah.db).
 """
+import io
 import sqlite3
 import urllib.parse
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from PIL import Image, ImageOps
 
 st.set_page_config(page_title="Toko Basmallah", page_icon="🛒", layout="wide")
 
@@ -48,7 +50,8 @@ def get_conn() -> sqlite3.Connection:
             grosir_harga INTEGER,
             partai_min INTEGER,
             partai_harga INTEGER,
-            stok INTEGER NOT NULL DEFAULT 0
+            stok INTEGER NOT NULL DEFAULT 0,
+            gambar BLOB
         );
         CREATE TABLE IF NOT EXISTS member (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,8 +96,26 @@ def get_conn() -> sqlite3.Connection:
         );
         """
     )
+    # Database lama (sebelum ada fitur gambar): tambahkan kolom gambar bila belum ada
+    kolom = [r["name"] for r in conn.execute("PRAGMA table_info(produk)")]
+    if "gambar" not in kolom:
+        conn.execute("ALTER TABLE produk ADD COLUMN gambar BLOB")
+        conn.commit()
     seed(conn)
     return conn
+
+
+def proses_gambar(file):
+    """Ubah gambar unggahan menjadi JPEG persegi 400x400 (hemat ruang). None bila file tidak valid."""
+    try:
+        img = Image.open(file)
+        img = ImageOps.exif_transpose(img).convert("RGB")
+        img = ImageOps.fit(img, (400, 400), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=82, optimize=True)
+        return buf.getvalue()
+    except Exception:
+        return None
 
 
 DEFAULT_SETTINGS = {
@@ -403,6 +424,8 @@ def page_kasir(cfg: dict) -> None:
                 harga1, _ = unit_price(p, 1, tier, cfg)
                 with cols[i % 3]:
                     with st.container(border=True):
+                        if p["gambar"]:
+                            st.image(p["gambar"], use_container_width=True)
                         st.markdown(f"**{p['nama']}**")
                         st.markdown(f"{rp(harga1)}")
                         if p["grosir_min"]:
@@ -600,15 +623,19 @@ def page_produk() -> None:
             gh = d2.number_input("Harga grosir (Rp)", min_value=0, step=500)
             pmin = d3.number_input("Partai mulai (jumlah)", min_value=0, step=1)
             ph = d4.number_input("Harga partai (Rp)", min_value=0, step=500)
+            foto = st.file_uploader("Gambar barang (boleh dikosongkan)", type=["jpg", "jpeg", "png", "webp"])
             if st.form_submit_button("Tambah", type="primary"):
-                if not nama.strip() or harga <= 0:
+                gambar = proses_gambar(foto) if foto is not None else None
+                if foto is not None and gambar is None:
+                    st.error("File gambar tidak bisa dibaca. Coba file JPG atau PNG lain.")
+                elif not nama.strip() or harga <= 0:
                     st.error("Isi nama dan harga eceran.")
                 elif (gmin and (gmin < 2 or gh <= 0 or gh >= harga)) or (pmin and (pmin <= (gmin or 1) or ph <= 0 or ph >= (gh or harga))):
                     st.error("Harga grosir harus lebih murah dari eceran, dan harga partai lebih murah dari grosir dengan jumlah mulai lebih besar.")
                 else:
                     run(
-                        "INSERT INTO produk(nama,harga,grosir_min,grosir_harga,partai_min,partai_harga,stok) VALUES (?,?,?,?,?,?,?)",
-                        (nama.strip(), int(harga), int(gmin) or None, int(gh) or None, int(pmin) or None, int(ph) or None, int(stok)),
+                        "INSERT INTO produk(nama,harga,grosir_min,grosir_harga,partai_min,partai_harga,stok,gambar) VALUES (?,?,?,?,?,?,?,?)",
+                        (nama.strip(), int(harga), int(gmin) or None, int(gh) or None, int(pmin) or None, int(ph) or None, int(stok), gambar),
                     )
                     st.success(f"{nama} ditambahkan.")
                     st.rerun()
@@ -635,6 +662,62 @@ def page_produk() -> None:
             )
         st.success("Perubahan disimpan.")
         st.rerun()
+
+
+# ----------------------------------------------------------------------------
+# Halaman: Gambar produk
+# ----------------------------------------------------------------------------
+def page_gambar() -> None:
+    st.subheader("Gambar produk")
+    produk = q("SELECT id, nama, gambar FROM produk ORDER BY nama")
+    if not produk:
+        st.info("Belum ada barang. Tambahkan barang di menu Produk.")
+        return
+
+    tanpa = sum(1 for p in produk if not p["gambar"])
+    st.caption(f"{len(produk) - tanpa} dari {len(produk)} barang sudah punya gambar.")
+
+    with st.container(border=True):
+        st.markdown("**Tambah atau ganti gambar**")
+        nama_by_id = {p["id"]: p["nama"] for p in produk}
+        pilih = st.selectbox("Barang", list(nama_by_id.keys()), format_func=lambda i: nama_by_id[i])
+        sekarang = next(p for p in produk if p["id"] == pilih)
+        c1, c2 = st.columns([1, 2], gap="large")
+        with c1:
+            if sekarang["gambar"]:
+                st.image(sekarang["gambar"], caption="Gambar sekarang", use_container_width=True)
+            else:
+                st.caption("Belum ada gambar.")
+        with c2:
+            foto = st.file_uploader(
+                "Unggah gambar (JPG, PNG, atau WEBP)", type=["jpg", "jpeg", "png", "webp"], key=f"unggah_{pilih}"
+            )
+            st.caption("Gambar otomatis dipotong persegi dan dikecilkan supaya ringan.")
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("Simpan gambar", type="primary", disabled=foto is None, use_container_width=True):
+                    data = proses_gambar(foto)
+                    if data is None:
+                        st.error("File gambar tidak bisa dibaca. Coba file JPG atau PNG lain.")
+                    else:
+                        run("UPDATE produk SET gambar=? WHERE id=?", (data, pilih))
+                        st.success("Gambar tersimpan.")
+                        st.rerun()
+            with b2:
+                if st.button("Hapus gambar", disabled=not sekarang["gambar"], use_container_width=True):
+                    run("UPDATE produk SET gambar=NULL WHERE id=?", (pilih,))
+                    st.rerun()
+
+    st.markdown("**Semua barang**")
+    kolom = st.columns(4)
+    for i, p in enumerate(produk):
+        with kolom[i % 4]:
+            with st.container(border=True):
+                if p["gambar"]:
+                    st.image(p["gambar"], use_container_width=True)
+                else:
+                    st.caption("Belum ada gambar")
+                st.markdown(f"**{p['nama']}**")
 
 
 # ----------------------------------------------------------------------------
@@ -703,7 +786,7 @@ def main() -> None:
     init_state()
     cfg = get_settings()
     st.title("Toko Basmallah")
-    tabs = st.tabs(["Kasir", "Dasbor", "Produk", "Member", "Hutang"])
+    tabs = st.tabs(["Kasir", "Dasbor", "Produk", "Gambar", "Member", "Hutang"])
     with tabs[0]:
         page_kasir(cfg)
     with tabs[1]:
@@ -711,8 +794,10 @@ def main() -> None:
     with tabs[2]:
         page_produk()
     with tabs[3]:
-        page_member(cfg)
+        page_gambar()
     with tabs[4]:
+        page_member(cfg)
+    with tabs[5]:
         page_hutang()
 
 
